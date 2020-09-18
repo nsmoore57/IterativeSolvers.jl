@@ -78,36 +78,64 @@ Same as [`gauss_seidel!`](@ref), but allocates a solution vector `x` initialized
 """
 gauss_seidel(A::AbstractMatrix, b; kwargs...) = gauss_seidel!(zerox(A, b), A, b; kwargs...)
 
+abstract type GSSweep end
+struct ForwardSweep <: GSSweep end
+struct BackwardSweep <: GSSweep end
+struct SymmetricSweep <: GSSweep end
+
 """
-    gauss_seidel!(x, A::AbstractMatrix, b; maxiter=10) -> x
+    gauss_seidel!(x, A::AbstractMatrix, b; maxiter=10, sweep="forward") -> x
 
 Performs exactly `maxiter` Gauss-Seidel iterations.
 
 Works fully in-place and traverses `A` columnwise.
 
+Direction of sweep is one of {"forward", "backward", "symmetric"}.
+
 Throws `LinearAlgebra.SingularException` when the diagonal has a zero. This check
 is performed once beforehand.
 """
-function gauss_seidel!(x, A::AbstractMatrix, b; maxiter::Int=10)
+function gauss_seidel!(x, A::AbstractMatrix, b; maxiter::Int=10, sweep="forward")
     check_diag(A)
-    iterable = DenseGaussSeidelIterable(A, x, b, maxiter)
+    if sweep == "forward"
+        iterable = DenseGaussSeidelIterable(A, x, b, maxiter, ForwardSweep())
+    elseif sweep == "backward"
+        iterable = DenseGaussSeidelIterable(A, x, b, maxiter, BackwardSweep())
+    elseif sweep == "symmetric"
+        iterable = DenseGaussSeidelIterable(A, x, b, maxiter, SymmetricSweep())
+    else
+        throw(ArgumentError("Unrecognized sweep: $sweep"))
+    end
     for _ = iterable end
     x
 end
 
-mutable struct DenseGaussSeidelIterable{matT,solT,rhsT}
+
+mutable struct DenseGaussSeidelIterable{matT,solT,rhsT,sweepT}
     A::matT
     x::solT
     b::rhsT
     maxiter::Int
+    sweep::sweepT
 end
+DenseGaussSeidelIterable(A, x, b, maxiter) = DenseGaussSeidelIterable(A, x, b, maxiter, ForwardSweep())
 
 start(::DenseGaussSeidelIterable) = 1
 done(it::DenseGaussSeidelIterable, iteration::Int) = iteration > it.maxiter
 
-function iterate(s::DenseGaussSeidelIterable, iteration::Int=start(s))
+function iterate(s::DenseGaussSeidelIterable{matT,solT,rhsT,sweepT}, iteration::Int=start(s)) where {matT,solT,rhsT,sweepT}
     if done(s, iteration) return nothing end
 
+    if sweepT == ForwardSweep || sweepT == SymmetricSweep
+        gs_forward!(s) 
+    end
+    if sweepT == BackwardSweep || sweepT == SymmetricSweep
+        gs_backward!(s)
+    end
+    nothing, iteration + 1
+end
+
+function gs_forward!(s::DenseGaussSeidelIterable)
     n = size(s.A, 1)
 
     for col = 1 : n
@@ -124,8 +152,25 @@ function iterate(s::DenseGaussSeidelIterable, iteration::Int=start(s))
             @inbounds s.x[row] -= s.A[row, col] * s.x[col]
         end
     end
+end
 
-    nothing, iteration + 1
+function gs_backward!(s::DenseGaussSeidelIterable)
+    n = size(s.A, 1)
+
+    for col = n : -1 : 1
+        @simd for row = col + 1 : n
+            @inbounds s.x[row] -= s.A[row, col] * s.x[col]
+        end
+
+        s.x[col] = s.b[col]
+    end
+
+    for col = n : -1 : 1
+        @inbounds s.x[col] /= s.A[col, col]
+        @simd for row = 1 : col - 1
+            @inbounds s.x[row] -= s.A[row, col] * s.x[col]
+        end
+    end
 end
 
 """
