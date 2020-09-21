@@ -29,13 +29,19 @@ Random.seed!(1234322)
         x0 = rand(T, n)
         tol = √eps(real(T))
 
-        for solver in (jacobi, gauss_seidel)
-            xi = solver(A, b, maxiter=2n)
+        xi = jacobi(A, b, maxiter=2n)
+        @test norm(b - A * xi)/norm(b) ≤ tol
+
+        for sweep in ("forward", "backward", "symmetric")
+            xi = gauss_seidel(A, b, maxiter=2n, sweep=sweep)
             @test norm(b - A * xi) / norm(b) ≤ tol
         end
 
-        for solver in (jacobi!, gauss_seidel!)
-            xi = solver(copy(x0), A, b, maxiter=2n)
+        xi = jacobi!(copy(x0), A, b, maxiter=2n)
+        @test norm(b - A * xi) / norm(b) ≤ tol
+
+        for sweep in ("forward", "backward", "symmetric")
+            xi = gauss_seidel!(copy(x0), A, b, maxiter=2n)
             @test norm(b - A * xi) / norm(b) ≤ tol
         end
 
