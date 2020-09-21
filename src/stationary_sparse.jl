@@ -257,9 +257,8 @@ end
 ## Gauss-Seidel
 ##
 
-mutable struct GaussSeidelIterable{solT, rhsT}
-    U::StrictlyUpperTriangular
-    L::FastLowerTriangular
+mutable struct GaussSeidelIterable{sweepiterT, solT, rhsT}
+    SweepIterable::sweepiterT
 
     x::solT
     b::rhsT
@@ -267,22 +266,72 @@ mutable struct GaussSeidelIterable{solT, rhsT}
     maxiter::Int
 end
 
-function gauss_seidel_iterable(x::AbstractVector, A::SparseMatrixCSC, b::AbstractVector; maxiter::Int = 10)
-    D = DiagonalIndices(A)
-    GaussSeidelIterable(StrictlyUpperTriangular(A, D), FastLowerTriangular(A, D), x, b, maxiter)
+mutable struct GaussSeidelForwardIterable
+    U::StrictlyUpperTriangular
+    L::FastLowerTriangular
 end
+
+mutable struct GaussSeidelBackwardIterable
+    U::FastUpperTriangular
+    L::StrictlyLowerTriangular
+end
+
+mutable struct GaussSeidelSymmetricIterable
+    F::GaussSeidelForwardIterable
+    B::GaussSeidelBackwardIterable
+end
+
+function gauss_seidel_iterable(x::AbstractVector, A::SparseMatrixCSC, b::AbstractVector; maxiter::Int = 10, sweep="forward")
+    D = DiagonalIndices(A)
+    if sweep == "forward"
+        forwarditer = GaussSeidelForwardIterable(StrictlyUpperTriangular(A,D), FastLowerTriangular(A,D))
+        iterable = GaussSeidelIterable(forwarditer, x, b, maxiter)
+    elseif sweep == "backward"
+        backwarditer = GaussSeidelBackwardIterable(FastUpperTriangular(A,D), StrictlyLowerTriangular(A,D))
+        iterable = GaussSeidelIterable(backwarditer, x, b, maxiter)
+    elseif sweep == "symmetric"
+        forwarditer = GaussSeidelForwardIterable(StrictlyUpperTriangular(A,D), FastLowerTriangular(A,D))
+        backwarditer = GaussSeidelBackwardIterable(FastUpperTriangular(A,D), StrictlyLowerTriangular(A,D))
+        symmiter = GaussSeidelSymmetricIterable(forwarditer, backwarditer)
+        iterable = GaussSeidelIterable(symmiter, x, b, maxiter)
+    else
+        throw(ArgumentError("Unrecognized sweep: $sweep"))
+    end
+    iterable
+end     
 
 start(::GaussSeidelIterable) = 1
 done(g::GaussSeidelIterable, iteration::Int) = iteration > g.maxiter
-function iterate(g::GaussSeidelIterable, iteration::Int=start(g))
+function iterate(g::GaussSeidelIterable{sweepiterT, solT, rhsT}, iteration::Int=start(g)) where {solT, rhsT, sweepiterT<:GaussSeidelForwardIterable}
     if done(g, iteration) return nothing end
-    # x ← L \ (-U * x + b)
-    T = eltype(g.x)
-    gauss_seidel_multiply!(-one(T), g.U, g.x, one(T), g.b, g.x)
-    forward_sub!(g.L, g.x)
-
+    gs_forward!(g.SweepIterable.U, g.SweepIterable.L, g.x, g.b)
     nothing, iteration + 1
 end
+function iterate(g::GaussSeidelIterable{sweepiterT, solT, rhsT}, iteration::Int=start(g)) where {solT, rhsT, sweepiterT<:GaussSeidelBackwardIterable}
+    if done(g, iteration) return nothing end
+    gs_backward!(g.SweepIterable.U, g.SweepIterable.L, g.x, g.b)
+    nothing, iteration + 1
+end
+function iterate(g::GaussSeidelIterable{sweepiterT, solT, rhsT}, iteration::Int=start(g)) where {solT, rhsT, sweepiterT<:GaussSeidelSymmetricIterable}
+    if done(g, iteration) return nothing end
+    gs_forward!(g.SweepIterable.F.U, g.SweepIterable.F.L, g.x, g.b)
+    gs_backward!(g.SweepIterable.B.U, g.SweepIterable.B.L, g.x, g.b)
+    nothing, iteration + 1
+end
+
+function gs_forward!(U::StrictlyUpperTriangular, L::FastLowerTriangular, x, b)
+    # x ← L \ (-U * x + b)
+    T = eltype(x)
+    gauss_seidel_multiply!(-one(T), U, x, one(T), b, x)
+    forward_sub!(L, x)    
+end
+function gs_backward!(U::FastUpperTriangular, L::StrictlyLowerTriangular, x, b)
+    # x ← U \ (-L * x + b)
+    T = eltype(x)
+    gauss_seidel_multiply!(-one(T), L, x, one(T), b, x)
+    backward_sub!(U, x)
+end
+
 
 """
     gauss_seidel!(x, A::SparseMatrixCSC, b; maxiter=10) -> x
@@ -294,8 +343,8 @@ Works fully in-place, but precomputes the diagonal indices.
 Throws `LinearAlgebra.SingularException` when the diagonal has a zero. This check
 is performed once beforehand.
 """
-function gauss_seidel!(x::AbstractVector, A::SparseMatrixCSC, b::AbstractVector; maxiter::Int = 10)
-    iterable = gauss_seidel_iterable(x, A, b, maxiter = maxiter)
+function gauss_seidel!(x::AbstractVector, A::SparseMatrixCSC, b::AbstractVector; maxiter::Int = 10, sweep = "forward")
+    iterable = gauss_seidel_iterable(x, A, b, maxiter = maxiter, sweep = sweep)
     for item = iterable end
     iterable.x
 end
